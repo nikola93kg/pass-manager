@@ -51,10 +51,10 @@ export function buildContentSecurityPolicy({
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
   ];
 
   if (!isDev) {
+    directives.push("frame-ancestors 'none'");
     directives.push('upgrade-insecure-requests');
   }
 
@@ -64,17 +64,17 @@ export function buildContentSecurityPolicy({
 export function getSecurityHeaders(options: CspOptions): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Security-Policy': buildContentSecurityPolicy(options),
-    'X-Frame-Options': 'DENY',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy':
       'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()',
-    'Cross-Origin-Opener-Policy': 'same-origin',
-    'Cross-Origin-Resource-Policy': 'same-origin',
     'X-Robots-Tag': 'noindex, nofollow, noarchive',
   };
 
   if (!options.isDev) {
+    headers['X-Frame-Options'] = 'DENY';
+    headers['Cross-Origin-Opener-Policy'] = 'same-origin';
+    headers['Cross-Origin-Resource-Policy'] = 'same-origin';
     headers['Strict-Transport-Security'] =
       'max-age=63072000; includeSubDomains; preload';
   }
