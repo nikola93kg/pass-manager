@@ -1,7 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  trailingSlash: true,
+  // Full Next.js server runtime enables middleware, CSP nonces,
+  // server-side Auth/MFA API routes, rate limiting, and dynamic /item/[id] deep links.
+  poweredByHeader: false,
+  reactStrictMode: true,
   images: {
     unoptimized: true,
   },
@@ -15,11 +17,8 @@ const nextConfig = {
       };
     }
 
-    // Redirect all imports of argon2-browser to the self-contained bundled
-    // version. The default lib/argon2.js uses require('../dist/argon2.wasm')
-    // which webpack converts to an asset URL string; decodeWasmBinary() then
-    // calls atob(url) and throws "string not correctly encoded".
-    // The bundled version has the WASM embedded as base64 — no external file.
+    // Redirect argon2-browser imports to the self-contained bundled build
+    // (embedded base64 WASM, no external .wasm file fetch needed).
     config.resolve.alias = {
       ...config.resolve.alias,
       'argon2-browser': require.resolve(
@@ -27,8 +26,6 @@ const nextConfig = {
       ),
     };
 
-    // Do not let webpack re-parse/transform the already-minified bundle.
-    // This preserves the embedded base64 WASM string intact.
     const existing = config.module.noParse;
     const bundledRe = /argon2-bundled\.min\.js$/;
     config.module.noParse = existing

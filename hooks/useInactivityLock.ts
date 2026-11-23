@@ -1,19 +1,31 @@
 // ============================================================
-// INACTIVITY TIMER + AUTO-LOCK
-// Locks vault after configurable inactivity period.
-// Also locks on: tab hidden, window blur, page unload.
+// INACTIVITY TIMER, WAKE-FROM-SLEEP LOCK & MULTI-TAB SYNC
+// - Wall-clock elapsed-time checks protect against OS sleep /
+//   mobile tab suspension where setTimeout pauses.
+// - Throttled activity tracking avoids timer churn on mousemove.
+// - Optional immediate lock on tab hidden / window blur.
+// - Listens for cross-tab lock broadcasts and external localStorage
+//   modifications to prevent silent multi-tab overwrites.
 // ============================================================
 
 'use client';
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useVaultStore } from '@/store/vaultStore';
+import { loadBlob, VAULT_STORAGE_KEY } from '@/lib/vaultService';
+import { getBlobRevision } from '@/lib/crypto';
+import { subscribeTabSync } from '@/lib/tabSync';
 
 const DEFAULT_LOCK_MS = 5 * 60 * 1000; // 5 minutes
+const ACTIVITY_THROTTLE_MS = 1000;
+const HEARTBEAT_MS = 5000;
 
 export function useInactivityLock() {
-  const { isUnlocked, lock, vault } = useVaultStore();
+  const { isUnlocked, lock, vault, revision, reportExternalConflict } = useVaultStore();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const lastThrottleRef = useRef<number>(0);
 
   const autoLockMs =
     vault?.settings?.autoLockMinutes != null
@@ -22,28 +34,59 @@ export function useInactivityLock() {
 
   const lockOnBlur = vault?.settings?.lockOnBlur ?? false;
 
-  const clearTimer = useCallback(() => {
+  const clearTimers = useCallback(() => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    if (heartbeatRef.current !== null) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
   }, []);
 
-  const resetTimer = useCallback(() => {
-    clearTimer();
-    if (!isUnlocked) return;
-    timerRef.current = setTimeout(() => {
+  const checkExpiredAndLock = useCallback(() => {
+    if (!useVaultStore.getState().isUnlocked) return false;
+    const elapsed = Date.now() - lastActivityRef.current;
+    if (elapsed >= autoLockMs) {
+      clearTimers();
       lock();
-    }, autoLockMs);
-  }, [isUnlocked, lock, autoLockMs, clearTimer]);
+      return true;
+    }
+    return false;
+  }, [autoLockMs, clearTimers, lock]);
+
+  const scheduleTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (!isUnlocked) return;
+    const remaining = Math.max(0, autoLockMs - (Date.now() - lastActivityRef.current));
+    timerRef.current = setTimeout(() => {
+      checkExpiredAndLock();
+    }, remaining);
+  }, [isUnlocked, autoLockMs, checkExpiredAndLock]);
+
+  const recordActivity = useCallback(() => {
+    const now = Date.now();
+    if (now - lastThrottleRef.current < ACTIVITY_THROTTLE_MS) {
+      return;
+    }
+    lastThrottleRef.current = now;
+    lastActivityRef.current = now;
+    scheduleTimer();
+  }, [scheduleTimer]);
 
   useEffect(() => {
     if (!isUnlocked) {
-      clearTimer();
+      clearTimers();
       return;
     }
 
-    // Activity events that reset the timer
+    lastActivityRef.current = Date.now();
+    lastThrottleRef.current = 0;
+
     const ACTIVITY_EVENTS = [
       'mousemove',
       'mousedown',
@@ -53,51 +96,116 @@ export function useInactivityLock() {
       'click',
     ] as const;
 
-    const handleActivity = () => resetTimer();
-
     ACTIVITY_EVENTS.forEach((event) => {
-      window.addEventListener(event, handleActivity, { passive: true });
+      window.addEventListener(event, recordActivity, { passive: true });
     });
 
-    // Lock on tab hidden (only if enabled in settings)
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        clearTimer();
+        if (lockOnBlur) {
+          clearTimers();
+          lock();
+        }
+      } else {
+        // Returning from background or OS sleep: check wall-clock elapsed time immediately
+        if (!checkExpiredAndLock()) {
+          scheduleTimer();
+        }
+      }
+    };
+
+    const handleBlur = () => {
+      if (lockOnBlur) {
+        clearTimers();
         lock();
       }
     };
 
-    // Lock on window blur (only if enabled in settings)
-    const handleBlur = () => {
-      clearTimer();
-      lock();
+    const handleFocus = () => {
+      if (!checkExpiredAndLock()) {
+        scheduleTimer();
+      }
     };
 
-    // Always lock on page unload / refresh
     const handleBeforeUnload = () => {
-      clearTimer();
-      lock();
+      clearTimers();
+      lock({ broadcast: false });
     };
 
-    if (lockOnBlur) {
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-      window.addEventListener('blur', handleBlur);
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    // Multi-tab localStorage write detection
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== VAULT_STORAGE_KEY) return;
+      const latest = loadBlob();
+      if (!latest) return;
+      const storedRev = getBlobRevision(latest);
+      const currentRev = useVaultStore.getState().revision;
+      if (storedRev > currentRev) {
+        reportExternalConflict({
+          source: 'tab',
+          localRevision: currentRev,
+          remoteRevision: storedRev,
+          remoteBlob: latest,
+          detectedAt: new Date().toISOString(),
+        });
+      }
+    };
 
-    // Start the initial timer
-    resetTimer();
+    // BroadcastChannel cross-tab sync
+    const unsubscribeTab = subscribeTabSync((msg) => {
+      if (msg.type === 'LOCK_VAULT') {
+        clearTimers();
+        lock({ broadcast: false });
+      } else if (msg.type === 'VAULT_REVISION_UPDATED') {
+        const currentRev = useVaultStore.getState().revision;
+        if (msg.revision > currentRev) {
+          const latest = loadBlob();
+          if (latest) {
+            reportExternalConflict({
+              source: 'tab',
+              localRevision: currentRev,
+              remoteRevision: msg.revision,
+              remoteBlob: latest,
+              detectedAt: new Date().toISOString(),
+            });
+          }
+        }
+      }
+    });
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('storage', handleStorage);
+
+    // Heartbeat protects against timer drift/throttling
+    heartbeatRef.current = setInterval(() => {
+      checkExpiredAndLock();
+    }, HEARTBEAT_MS);
+
+    scheduleTimer();
 
     return () => {
-      clearTimer();
+      clearTimers();
+      unsubscribeTab();
       ACTIVITY_EVENTS.forEach((event) => {
-        window.removeEventListener(event, handleActivity);
+        window.removeEventListener(event, recordActivity);
       });
-      if (lockOnBlur) {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-        window.removeEventListener('blur', handleBlur);
-      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('storage', handleStorage);
     };
-  }, [isUnlocked, lock, lockOnBlur, resetTimer, clearTimer]);
+  }, [
+    isUnlocked,
+    lock,
+    lockOnBlur,
+    revision,
+    recordActivity,
+    scheduleTimer,
+    checkExpiredAndLock,
+    clearTimers,
+    reportExternalConflict,
+  ]);
 }

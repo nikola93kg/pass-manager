@@ -4,6 +4,12 @@
 
 :root {
   color-scheme: dark;
+  --vault-bg: #110024;
+  --vault-surface: #1a0633;
+  --vault-elevated: #240c45;
+  --vault-border: #361861;
+  --vault-accent: #ab7eff;
+  --vault-soft: #f2ebff;
 }
 
 * {
@@ -13,45 +19,30 @@
 html,
 body {
   height: 100%;
+  background-color: var(--vault-bg);
+  color: var(--vault-soft);
 }
 
-/* Scrollbar */
+/* Custom dark-purple scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #110024;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: #3b1c6b;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: #5b2ea3;
 }
 
-/* Focus ring */
+/* Accessible focus ring using NMark accent purple */
 *:focus-visible {
-  outline: 2px solid #3b82f6;
+  outline: 2px solid #ab7eff;
   outline-offset: 2px;
-}
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
 }
 
 @layer utilities {

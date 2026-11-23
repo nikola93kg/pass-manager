@@ -1,34 +1,41 @@
 {
-  "name": "vault-app",
-  "version": "0.1.0",
+  "name": "nmark-pass-vault",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "export": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.119.2",
     "argon2-browser": "^1.18.0",
     "lucide-react": "^0.575.0",
-    "next": "14.2.35",
-    "react": "^18",
-    "react-dom": "^18",
-    "uuid": "^13.0.0",
+    "next": "15.5.29",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^4.6.7",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
     "@types/argon2-browser": "^1.18.4",
-    "@types/node": "^20",
+    "@types/node": "^22.20.5",
     "@types/react": "^18",
     "@types/react-dom": "^18",
-    "@types/uuid": "^10.0.0",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.35",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.29",
+    "jsdom": "^26.0.0",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^5.1.1"
   }
 }

@@ -9,8 +9,16 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "var(--background)",
-        foreground: "var(--foreground)",
+        vault: {
+          bg: "#110024",
+          surface: "#1a0633",
+          elevated: "#240c45",
+          border: "#361861",
+          accent: "#ab7eff",
+          "accent-hover": "#9661ff",
+          soft: "#f2ebff",
+          muted: "#a998c9",
+        },
       },
     },
   },

@@ -1,5 +1,6 @@
 // ============================================================
-// UnlockPage — Enter master password to decrypt vault
+// UnlockPage — Enter Master Password to Decrypt Vault Locally
+// Separate boundary from application auth & MFA.
 // ============================================================
 
 'use client';
@@ -7,9 +8,24 @@
 import { useState } from 'react';
 import { unlockVault } from '@/lib/vaultService';
 import { useVaultStore } from '@/store/vaultStore';
-import { ShieldCheck, Eye, EyeOff } from 'lucide-react';
+import { ShieldCheck, Eye, EyeOff, Cloud, HardDrive, KeyRound, LogOut } from 'lucide-react';
+import type { EncryptedVaultBlob } from '@/lib/types';
 
-export default function UnlockPage() {
+interface Props {
+  cloudEnabled?: boolean;
+  userEmail?: string | null;
+  remoteBlob?: EncryptedVaultBlob | null;
+  deepLinkItemId?: string | null;
+  onSignOut?: () => void;
+}
+
+export default function UnlockPage({
+  cloudEnabled,
+  userEmail,
+  remoteBlob,
+  deepLinkItemId,
+  onSignOut,
+}: Props) {
   const unlock = useVaultStore((s) => s.unlock);
   const [password, setPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
@@ -22,14 +38,14 @@ export default function UnlockPage() {
     setLoading(true);
 
     try {
-      const { key, vault, salt } = await unlockVault(password);
-      unlock(key, vault, salt);
+      const result = await unlockVault(password, remoteBlob ?? undefined);
+      unlock(result.key, result.vault, result.salt, result.revision, {
+        migratedFromV1: result.migratedFromV1,
+      });
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to unlock vault.';
-      // Sanitize — don't echo password-derived messages with sensitive content
+      const msg = err instanceof Error ? err.message : 'Failed to unlock vault.';
       if (msg.toLowerCase().includes('decryption')) {
-        setError('Incorrect password. Please try again.');
+        setError('Incorrect master password or tampered vault envelope.');
       } else {
         setError(msg);
       }
@@ -40,29 +56,62 @@ export default function UnlockPage() {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-950 p-4">
+    <div className="flex items-center justify-center min-h-screen bg-vault-bg p-4">
       <div className="w-full max-w-sm">
-        {/* Header */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mb-4">
-            <ShieldCheck className="w-8 h-8 text-white" />
+        <div className="flex flex-col items-center mb-7">
+          <div className="w-16 h-16 bg-vault-elevated border border-vault-accent/40 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-vault-accent/10">
+            <ShieldCheck className="w-8 h-8 text-vault-accent" />
           </div>
-          <h1 className="text-2xl font-bold text-white">Unlock Vault</h1>
-          <p className="text-gray-400 text-sm mt-2">Enter your master password</p>
+          <h1 className="text-2xl font-bold text-vault-soft tracking-tight">
+            NMark Pass Vault
+          </h1>
+          <p className="text-vault-muted text-sm mt-1.5 text-center">
+            Enter your master password to decrypt locally
+          </p>
+
+          <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-vault-surface border border-vault-border text-xs text-vault-muted">
+            {cloudEnabled ? (
+              <>
+                <Cloud className="w-3.5 h-3.5 text-vault-accent" />
+                <span>MFA Verified · {userEmail ?? 'Cloud Sync'}</span>
+              </>
+            ) : (
+              <>
+                <HardDrive className="w-3.5 h-3.5 text-vault-accent" />
+                <span>Local Encrypted Vault</span>
+              </>
+            )}
+          </div>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="bg-gray-900 rounded-2xl p-6 space-y-4">
+        {deepLinkItemId && (
+          <div className="mb-4 bg-vault-elevated/80 border border-vault-accent/30 rounded-xl px-4 py-3 text-xs text-vault-soft flex items-center gap-2.5">
+            <KeyRound className="w-4 h-4 text-vault-accent shrink-0" />
+            <span>
+              Unlock your vault to open entry{' '}
+              <code className="font-mono text-vault-accent">{deepLinkItemId}</code>.
+            </span>
+          </div>
+        )}
+
+        <form
+          onSubmit={handleSubmit}
+          className="bg-vault-surface border border-vault-border rounded-2xl p-6 space-y-4 shadow-xl shadow-black/40"
+        >
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
+            <label
+              htmlFor="vault-master-password"
+              className="block text-sm font-medium text-vault-soft/90 mb-1.5"
+            >
               Master Password
             </label>
             <div className="relative">
               <input
+                id="vault-master-password"
                 type={showPw ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 pr-10 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                className="w-full bg-vault-bg border border-vault-border rounded-xl px-4 py-2.5 pr-10 text-vault-soft placeholder-vault-muted/50 focus:outline-none focus:border-vault-accent focus:ring-1 focus:ring-vault-accent text-sm"
                 placeholder="Master password"
                 autoComplete="current-password"
                 autoFocus
@@ -71,7 +120,7 @@ export default function UnlockPage() {
               <button
                 type="button"
                 onClick={() => setShowPw((v) => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-vault-muted hover:text-vault-soft"
                 aria-label={showPw ? 'Hide password' : 'Show password'}
               >
                 {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -80,7 +129,10 @@ export default function UnlockPage() {
           </div>
 
           {error && (
-            <div className="bg-red-900/30 border border-red-700 text-red-300 text-sm rounded-lg px-4 py-3">
+            <div
+              role="alert"
+              className="bg-red-950/60 border border-red-700/70 text-red-200 text-sm rounded-xl px-4 py-3"
+            >
               {error}
             </div>
           )}
@@ -88,21 +140,32 @@ export default function UnlockPage() {
           <button
             type="submit"
             disabled={loading || password.length === 0}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
+            className="w-full bg-vault-accent hover:bg-vault-accent-hover disabled:bg-vault-elevated disabled:text-vault-muted text-vault-bg font-semibold py-2.5 rounded-xl transition-colors flex items-center justify-center gap-2"
           >
             {loading ? (
               <>
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Unlocking...
+                <div className="w-4 h-4 border-2 border-vault-bg border-t-transparent rounded-full animate-spin" />
+                Deriving key &amp; unlocking...
               </>
             ) : (
-              'Unlock'
+              'Unlock Vault'
             )}
           </button>
+
+          {cloudEnabled && onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="w-full flex items-center justify-center gap-2 text-xs text-vault-muted hover:text-vault-soft pt-1 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out of cloud session
+            </button>
+          )}
         </form>
 
-        <p className="text-center text-xs text-gray-600 mt-6">
-          All data is encrypted with AES-256-GCM + Argon2id
+        <p className="text-center text-xs text-vault-muted/70 mt-6">
+          AES-256-GCM (AAD) + Argon2id (64 MiB) · Zero-Knowledge
         </p>
       </div>
     </div>
