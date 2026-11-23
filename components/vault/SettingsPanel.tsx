@@ -19,6 +19,9 @@ import {
   safeResetVault,
   createRecoverySnapshot,
   loadBlob,
+  loadSyncMetadata,
+  markCloudSynced,
+  markLocalUnsynced,
   type VerifiedBackupResult,
 } from '@/lib/vaultService';
 import { pushCloudVault } from '@/lib/cloudSync';
@@ -220,8 +223,11 @@ export default function SettingsPanel() {
     setImportError('');
     try {
       const { blob, revision: newRev } = await commitVerifiedBackupImport(verifiedPreview);
+      await markLocalUnsynced(blob);
       if (syncMode === 'cloud') {
-        await pushCloudVault(blob, revision);
+        const expectedCloudRev = loadSyncMetadata()?.lastSyncedRevision ?? revision;
+        await pushCloudVault(blob, expectedCloudRev);
+        await markCloudSynced(blob);
       }
       unlock(verifiedPreview.key, verifiedPreview.vault, verifiedPreview.salt, newRev);
       setSnapshots(listRecoverySnapshots());
@@ -245,8 +251,11 @@ export default function SettingsPanel() {
     setRestoreBusy(true);
     try {
       const res = await restoreRecoverySnapshot(restoreTarget, restorePw);
+      await markLocalUnsynced(res.blob);
       if (syncMode === 'cloud') {
-        await pushCloudVault(res.blob, revision);
+        const expectedCloudRev = loadSyncMetadata()?.lastSyncedRevision ?? revision;
+        await pushCloudVault(res.blob, expectedCloudRev);
+        await markCloudSynced(res.blob);
       }
       unlock(res.key, res.vault, res.salt, res.revision);
       setRestoreTarget(null);
@@ -281,7 +290,10 @@ export default function SettingsPanel() {
       return;
     }
     try {
-      await pushCloudVault(local, Math.max(0, local.revision - 1));
+      const expectedCloudRev =
+        loadSyncMetadata()?.lastSyncedRevision ?? Math.max(0, local.revision - 1);
+      await pushCloudVault(local, expectedCloudRev);
+      await markCloudSynced(local);
       setCloudMigrateMsg('Encrypted vault synced to cloud.');
     } catch (err: unknown) {
       setCloudMigrateMsg(err instanceof Error ? err.message : 'Cloud sync failed.');

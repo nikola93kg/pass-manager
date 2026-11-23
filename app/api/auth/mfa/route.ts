@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { authorizeVaultAccess } from '@/lib/auth/guard';
 import {
-  checkRateLimit,
+  enforceRateLimit,
   getClientIpFromHeaders,
   RATE_LIMIT_TIERS,
 } from '@/lib/security/rateLimit';
@@ -37,8 +37,8 @@ export async function POST(request: Request) {
   }
 
   const ip = getClientIpFromHeaders(request.headers);
-  const rl = checkRateLimit(`auth:mfa:${ip}`, RATE_LIMIT_TIERS.mfa);
-  if (!rl.allowed) {
+  const ipRl = await enforceRateLimit(`auth:mfa:ip:${ip}`, RATE_LIMIT_TIERS.mfa);
+  if (!ipRl.allowed) {
     return NextResponse.json(
       { error: 'Too many MFA attempts. Please wait and try again.' },
       { status: 429, headers: NO_STORE }
@@ -52,6 +52,17 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: authz.authorized ? 'Unavailable.' : authz.error },
       { status: authz.authorized ? 503 : authz.status, headers: NO_STORE }
+    );
+  }
+
+  const userRl = await enforceRateLimit(
+    `auth:mfa:user:${authz.user.id}`,
+    RATE_LIMIT_TIERS.mfa
+  );
+  if (!userRl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many MFA attempts. Please wait and try again.' },
+      { status: 429, headers: NO_STORE }
     );
   }
 

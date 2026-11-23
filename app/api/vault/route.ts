@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { authorizeVaultAccess } from '@/lib/auth/guard';
 import {
-  checkRateLimit,
+  enforceRateLimit,
   getClientIpFromHeaders,
   RATE_LIMIT_TIERS,
 } from '@/lib/security/rateLimit';
@@ -66,8 +66,8 @@ function rowToBlobV2(row: VaultRow): EncryptedVaultBlobV2 {
 
 export async function GET(request: Request) {
   const ip = getClientIpFromHeaders(request.headers);
-  const rl = checkRateLimit(`vault:read:${ip}`, RATE_LIMIT_TIERS.vaultRead);
-  if (!rl.allowed) {
+  const ipRl = await enforceRateLimit(`vault:read:ip:${ip}`, RATE_LIMIT_TIERS.vaultRead);
+  if (!ipRl.allowed) {
     return NextResponse.json(
       { error: 'Rate limit exceeded.' },
       { status: 429, headers: NO_STORE }
@@ -80,6 +80,17 @@ export async function GET(request: Request) {
     return NextResponse.json(
       { error: authz.authorized ? 'Unavailable.' : authz.error, code: authz.authorized ? undefined : authz.code },
       { status: authz.authorized ? 503 : authz.status, headers: NO_STORE }
+    );
+  }
+
+  const userRl = await enforceRateLimit(
+    `vault:read:user:${authz.user.id}`,
+    RATE_LIMIT_TIERS.vaultRead
+  );
+  if (!userRl.allowed) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded.' },
+      { status: 429, headers: NO_STORE }
     );
   }
 
@@ -124,8 +135,8 @@ export async function PUT(request: Request) {
   }
 
   const ip = getClientIpFromHeaders(request.headers);
-  const rl = checkRateLimit(`vault:write:${ip}`, RATE_LIMIT_TIERS.vaultWrite);
-  if (!rl.allowed) {
+  const ipRl = await enforceRateLimit(`vault:write:ip:${ip}`, RATE_LIMIT_TIERS.vaultWrite);
+  if (!ipRl.allowed) {
     return NextResponse.json(
       { error: 'Rate limit exceeded.' },
       { status: 429, headers: NO_STORE }
@@ -138,6 +149,17 @@ export async function PUT(request: Request) {
     return NextResponse.json(
       { error: authz.authorized ? 'Unavailable.' : authz.error, code: authz.authorized ? undefined : authz.code },
       { status: authz.authorized ? 503 : authz.status, headers: NO_STORE }
+    );
+  }
+
+  const userRl = await enforceRateLimit(
+    `vault:write:user:${authz.user.id}`,
+    RATE_LIMIT_TIERS.vaultWrite
+  );
+  if (!userRl.allowed) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded.' },
+      { status: 429, headers: NO_STORE }
     );
   }
 

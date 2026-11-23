@@ -167,7 +167,7 @@ describe('Vault Persistence, Serialized Concurrency, Multi-Tab & Cloud Conflicts
 
     // Accept remote revision cleanly
     const decryptedRemote = await decryptVault(remoteBlob, created.key);
-    useVaultStore.getState().resolveConflictAcceptRemote(decryptedRemote, remoteBlob);
+    await useVaultStore.getState().resolveConflictAcceptRemote(decryptedRemote, remoteBlob);
 
     expect(useVaultStore.getState().conflict).toBeNull();
     expect(useVaultStore.getState().revision).toBe(4);

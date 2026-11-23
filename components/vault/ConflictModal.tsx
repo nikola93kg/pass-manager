@@ -60,7 +60,7 @@ export default function ConflictModal() {
 
       try {
         const remoteVault = await decryptVault(conflict.remoteBlob, keyToUse);
-        resolveConflictAcceptRemote(remoteVault, conflict.remoteBlob);
+        await resolveConflictAcceptRemote(remoteVault, conflict.remoteBlob);
       } catch {
         // Remote vault may have been re-keyed with a new master password
         setNeedPassword(true);
@@ -87,6 +87,15 @@ export default function ConflictModal() {
     }
   };
 
+  const reasonDetail =
+    conflict.reason === 'equal_revision_diverged'
+      ? `Both local and cloud are at revision #${conflict.remoteRevision}, but their encrypted ciphertexts differ (concurrent offline edits).`
+      : conflict.reason === 'unsaved_local_changes'
+        ? `This browser has unsynced local changes (rev #${conflict.localRevision}) while cloud holds revision #${conflict.remoteRevision}.`
+        : conflict.reason === 'local_ahead_of_cloud'
+          ? `Local vault (rev #${conflict.localRevision}) is ahead of cloud (rev #${conflict.remoteRevision}).`
+          : `Another ${conflict.source === 'cloud' ? 'device' : 'browser tab'} saved revision #${conflict.remoteRevision} while this session was based on revision #${conflict.localRevision}.`;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
@@ -106,11 +115,7 @@ export default function ConflictModal() {
                 : 'Multi-Tab Modification Detected'}
             </h2>
             <p className="text-xs text-vault-muted mt-1 leading-relaxed">
-              Another {conflict.source === 'cloud' ? 'device' : 'browser tab'} saved{' '}
-              <strong className="text-vault-soft">revision #{conflict.remoteRevision}</strong>{' '}
-              while this session was based on{' '}
-              <strong className="text-vault-soft">revision #{conflict.localRevision}</strong>.
-              Your write was paused so newer credentials are not overwritten.
+              {reasonDetail} Your local data was preserved and nothing was overwritten.
             </p>
           </div>
         </div>

@@ -9,7 +9,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:staging": "vitest run --config vitest.staging.config.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

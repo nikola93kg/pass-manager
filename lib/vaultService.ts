@@ -21,6 +21,7 @@ import {
   ARGON2_PARALLEL,
 } from './crypto';
 import { generateVaultItemId } from './urlSafety';
+import { computeBlobFingerprint } from './syncReconcile';
 import type {
   PlaintextVault,
   EncryptedVaultBlob,
@@ -28,9 +29,11 @@ import type {
   VaultItem,
   VaultSettings,
   RecoverySnapshot,
+  LocalSyncMetadata,
 } from './types';
 
 export const VAULT_STORAGE_KEY = 'secure_vault_blob';
+export const SYNC_METADATA_KEY = 'secure_vault_sync_meta';
 export const RECOVERY_SNAPSHOTS_KEY = 'secure_vault_recovery_snapshots';
 export const DEVICE_ID_KEY = 'secure_vault_device_id';
 const MAX_RECOVERY_SNAPSHOTS = 5;
@@ -139,6 +142,83 @@ export function persistBlob(
   }
 
   localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(blob));
+}
+
+// ----------------------------------------------------------
+// Persisted Sync Metadata (non-sensitive digests & dirty flag)
+// Tracks unsynced local changes across browser reloads/locks so
+// cloud fetches NEVER silently overwrite diverged local edits.
+// ----------------------------------------------------------
+
+export function loadSyncMetadata(): LocalSyncMetadata | null {
+  if (typeof window === 'undefined') return null;
+  const raw = localStorage.getItem(SYNC_METADATA_KEY);
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj.hasUnsavedLocalChanges !== 'boolean') return null;
+    return {
+      hasUnsavedLocalChanges: obj.hasUnsavedLocalChanges,
+      lastSyncedRevision:
+        typeof obj.lastSyncedRevision === 'number' && Number.isSafeInteger(obj.lastSyncedRevision)
+          ? obj.lastSyncedRevision
+          : null,
+      lastSyncedFingerprint:
+        typeof obj.lastSyncedFingerprint === 'string' && obj.lastSyncedFingerprint.length === 64
+          ? obj.lastSyncedFingerprint
+          : null,
+      lastLocalFingerprint:
+        typeof obj.lastLocalFingerprint === 'string' && obj.lastLocalFingerprint.length === 64
+          ? obj.lastLocalFingerprint
+          : null,
+      updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveSyncMetadata(meta: LocalSyncMetadata): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SYNC_METADATA_KEY, JSON.stringify(meta));
+  } catch {
+    // Best-effort metadata persistence
+  }
+}
+
+export function clearSyncMetadata(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(SYNC_METADATA_KEY);
+}
+
+export async function markLocalUnsynced(blob: EncryptedVaultBlob): Promise<LocalSyncMetadata> {
+  const existing = loadSyncMetadata();
+  const fp = await computeBlobFingerprint(blob);
+  const next: LocalSyncMetadata = {
+    hasUnsavedLocalChanges: true,
+    lastSyncedRevision: existing?.lastSyncedRevision ?? null,
+    lastSyncedFingerprint: existing?.lastSyncedFingerprint ?? null,
+    lastLocalFingerprint: fp,
+    updatedAt: new Date().toISOString(),
+  };
+  saveSyncMetadata(next);
+  return next;
+}
+
+export async function markCloudSynced(blob: EncryptedVaultBlob): Promise<LocalSyncMetadata> {
+  const fp = await computeBlobFingerprint(blob);
+  const next: LocalSyncMetadata = {
+    hasUnsavedLocalChanges: false,
+    lastSyncedRevision: getBlobRevision(blob),
+    lastSyncedFingerprint: fp,
+    lastLocalFingerprint: fp,
+    updatedAt: new Date().toISOString(),
+  };
+  saveSyncMetadata(next);
+  return next;
 }
 
 // ----------------------------------------------------------
@@ -469,12 +549,14 @@ export function safeResetVault(): RecoverySnapshot | null {
   if (typeof window === 'undefined') return null;
   const snapshot = createRecoverySnapshot('reset');
   localStorage.removeItem(VAULT_STORAGE_KEY);
+  clearSyncMetadata();
   return snapshot;
 }
 
 export function deleteVault(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(VAULT_STORAGE_KEY);
+  clearSyncMetadata();
 }
 
 // ----------------------------------------------------------

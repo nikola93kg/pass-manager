@@ -1,16 +1,24 @@
 // ============================================================
 // /api/auth/session
-// GET  — Return current authentication & MFA assurance state
-// POST — Single-admin email/password sign-in (NO public sign-up)
+// GET  — Return current authentication & MFA assurance state.
+//        Fails closed (503) in production if cloud auth is
+//        unconfigured unless ALLOW_LOCAL_ONLY_MODE=true.
+// POST — Single-admin email/password sign-in (NO public sign-up),
+//        protected by distributed IP + account-hash rate limiting.
 // ============================================================
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
-import { isCloudSyncConfigured, isUserAllowedAdmin } from '@/lib/env';
 import {
-  checkRateLimit,
+  isCloudSyncConfigured,
+  isLocalOnlyModeAllowed,
+  isUserAllowedAdmin,
+} from '@/lib/env';
+import {
+  enforceRateLimit,
   getClientIpFromHeaders,
+  hashRateLimitKey,
   RATE_LIMIT_TIERS,
 } from '@/lib/security/rateLimit';
 import { verifySameOriginRequest } from '@/lib/security/csrf';
@@ -27,15 +35,27 @@ const NO_STORE = { 'Cache-Control': 'no-store' };
 
 export async function GET() {
   if (!isCloudSyncConfigured()) {
-    const localState: AuthSessionState = {
-      mode: 'local',
-      step: 'local_only',
-      userEmail: null,
-      userId: null,
-      aal: null,
-      hasTotpFactor: false,
-    };
-    return NextResponse.json(localState, { headers: NO_STORE });
+    if (isLocalOnlyModeAllowed()) {
+      const localState: AuthSessionState = {
+        mode: 'local',
+        step: 'local_only',
+        userEmail: null,
+        userId: null,
+        aal: null,
+        hasTotpFactor: false,
+      };
+      return NextResponse.json(localState, { headers: NO_STORE });
+    }
+
+    // Fail closed in production when cloud auth is not configured and local-only is not explicitly opted in
+    return NextResponse.json(
+      {
+        error:
+          'Cloud authentication is required in production but Supabase is not configured.',
+        code: 'CLOUD_AUTH_MISCONFIGURED',
+      },
+      { status: 503, headers: NO_STORE }
+    );
   }
 
   const supabase = await createSupabaseServerClient();
@@ -117,8 +137,8 @@ export async function POST(request: Request) {
   }
 
   const ip = getClientIpFromHeaders(request.headers);
-  const rl = checkRateLimit(`auth:signin:${ip}`, RATE_LIMIT_TIERS.auth);
-  if (!rl.allowed) {
+  const ipLimit = await enforceRateLimit(`auth:signin:ip:${ip}`, RATE_LIMIT_TIERS.auth);
+  if (!ipLimit.allowed) {
     return NextResponse.json(
       { error: 'Too many authentication attempts. Please try again later.' },
       { status: 429, headers: NO_STORE }
@@ -140,6 +160,19 @@ export async function POST(request: Request) {
     );
   }
 
+  // Secondary account-hashed rate limit prevents IP-rotation brute force against the admin email
+  const emailHash = await hashRateLimitKey(parsed.data.email);
+  const acctLimit = await enforceRateLimit(
+    `auth:signin:acct:${emailHash}`,
+    RATE_LIMIT_TIERS.auth
+  );
+  if (!acctLimit.allowed) {
+    return NextResponse.json(
+      { error: 'Too many authentication attempts. Please try again later.' },
+      { status: 429, headers: NO_STORE }
+    );
+  }
+
   const supabase = await createSupabaseServerClient();
   if (!supabase) {
     return NextResponse.json(
@@ -154,14 +187,12 @@ export async function POST(request: Request) {
   });
 
   if (error || !data.user) {
-    // Generic error to prevent account enumeration
     return NextResponse.json(
       { error: 'Invalid credentials or access denied.' },
       { status: 401, headers: NO_STORE }
     );
   }
 
-  // Enforce single-admin allowlist server-side; immediately terminate non-admin sessions
   if (!isUserAllowedAdmin({ id: data.user.id, email: data.user.email })) {
     await supabase.auth.signOut();
     return NextResponse.json(

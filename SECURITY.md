@@ -71,10 +71,22 @@ Enforced on every response via `middleware.ts` (`lib/security/csp.ts`):
 
 ---
 
-## 5. Server-Side Controls & CSRF / Rate Limiting
+## 5. Server-Side Controls, Fail-Closed Auth, Rate Limiting & Proxy Trust
 
+- **Fail-Closed Authentication (`components/VaultApp.tsx`, `app/api/auth/session/route.ts`):**
+  - If `/api/auth/session` fails due to a network error, HTTP `5xx`, or malformed response, the client **never** falls back to local-only mode; it renders a retryable fail-closed error screen instead of bypassing cloud auth or MFA.
+  - In production (`NODE_ENV === 'production'`), `/api/auth/session` returns HTTP `503` if Supabase is unconfigured unless `ALLOW_LOCAL_ONLY_MODE=true` is explicitly set for an intentional local-only deployment.
+- **Unsynced Local Data Protection (`lib/syncReconcile.ts`, `lib/vaultService.ts`, `store/vaultStore.ts`):**
+  - Persists non-sensitive sync metadata (`localStorage['secure_vault_sync_meta']`: `hasUnsavedLocalChanges`, `lastSyncedRevision`, and SHA-256 encrypted envelope fingerprints — never plaintext).
+  - Cloud fetches never overwrite unsynced local edits, local-ahead revisions, or equal-revision diverged ciphertext (`localRev === cloudRev` with differing fingerprints); instead, the local blob is preserved and `ConflictModal` guides safe recovery.
+- **Atomic First-Time & Concurrent Cloud Writes (`supabase/migrations/002_harden_upsert_rpc.sql`):**
+  - `public.upsert_encrypted_vault` acquires a per-user transaction advisory lock (`pg_advisory_xact_lock`), validates non-negative sequential revisions and v2 AAD envelopes, uses `INSERT ... ON CONFLICT (user_id) DO NOTHING` on first insert (returning atomic `CONFLICT` instead of `23505 unique_violation`), and verifies `ROW_COUNT` on conditional `UPDATE`.
 - **CSRF Protection (`lib/security/csrf.ts`):** All `POST`/`PUT`/`PATCH`/`DELETE` routes verify `Sec-Fetch-Site` and `Origin` against the request host / `NEXT_PUBLIC_APP_URL`, paired with `HttpOnly; SameSite=Lax; Secure` session cookies.
-- **Rate Limiting (`lib/security/rateLimit.ts`):** Sliding-window limits on `/api/auth/session`, `/api/auth/mfa`, `/api/vault`, and `/api/vault/snapshots`. In multi-region/serverless production deployments, pair with Cloudflare WAF / Vercel Edge rate limiting (see `DEPLOYMENT.md`).
+- **Distributed Rate Limiting & Trusted Proxy IP Extraction (`lib/security/rateLimit.ts`):**
+  - Supports **Upstash Redis REST API** (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`) for production multi-instance / serverless deployments.
+  - **Fail-closed on auth/MFA:** If configured Redis is unreachable, `auth` and `mfa` tiers fail closed (`429`) rather than permitting unlimited brute-force attempts.
+  - **Account + User Keying:** Sign-in is rate-limited by both verified IP and SHA-256 email hash; MFA and vault endpoints are rate-limited by both verified IP and authenticated `userId`.
+  - **No Untrusted Forwarded IP Headers:** Client-supplied `X-Forwarded-For` / `X-Real-Ip` headers are ignored by default (`TRUSTED_PROXY_PROVIDER=none`). Configure `cloudflare` (`cf-connecting-ip`), `vercel` (`x-vercel-forwarded-for`), or `custom` (rightmost `TRUSTED_PROXY_HOP_COUNT` hop) to match your verified reverse proxy.
 - **No Privileged DB Credentials in Runtime:** Both browser and server routes use the Supabase `anon` key with the authenticated user's JWT so PostgreSQL RLS (`owner + aal2`) is enforced even if an application bug occurs.
 
 ---

@@ -1,11 +1,13 @@
 // ============================================================
 // VaultApp — Unified Client Orchestrator
-// Enforces strict security boundaries in order:
+// Enforces strict FAIL-CLOSED security boundaries in order:
+//   0. Session Fetch — NEVER fails open to local_only on errors
 //   1. Cloud Auth (single-admin allowlist) — when Supabase configured
 //   2. Mandatory MFA (TOTP aal2)           — when Supabase configured
-//   3. First-time Local -> Cloud Migration — safe, backup-verified
-//   4. Master Password Vault Unlock        — ALWAYS required locally
-//   5. Client Hub Deep-Link Item Display   — ONLY after unlock
+//   3. Safe Local/Cloud Reconciliation     — NEVER overwrites unsynced local edits
+//   4. First-time Local -> Cloud Migration — backup-verified
+//   5. Master Password Vault Unlock        — ALWAYS required locally
+//   6. Client Hub Deep-Link Item Display   — ONLY after unlock
 // ============================================================
 
 'use client';
@@ -15,15 +17,17 @@ import { useVaultStore } from '@/store/vaultStore';
 import {
   hasVault,
   loadBlob,
+  loadSyncMetadata,
   persistBlob,
+  markCloudSynced,
   exportVault,
   triggerDownload,
   createRecoverySnapshot,
 } from '@/lib/vaultService';
-import { fetchCloudVault, pushCloudVault } from '@/lib/cloudSync';
+import { reconcileLocalAndCloudBlobs } from '@/lib/syncReconcile';
+import { fetchCloudVault, pushCloudVault, CloudAuthError } from '@/lib/cloudSync';
 import { isValidVaultItemId } from '@/lib/urlSafety';
-import { getBlobRevision } from '@/lib/crypto';
-import type { AuthSessionState, EncryptedVaultBlob } from '@/lib/types';
+import type { AuthSessionState, EncryptedVaultBlob, VaultConflict } from '@/lib/types';
 
 import LoadingScreen from '@/components/ui/LoadingScreen';
 import CloudSignInPage from '@/components/auth/CloudSignInPage';
@@ -31,7 +35,7 @@ import MfaGatePage from '@/components/auth/MfaGatePage';
 import SetupPage from '@/components/auth/SetupPage';
 import UnlockPage from '@/components/auth/UnlockPage';
 import VaultLayout from '@/components/vault/VaultLayout';
-import { ShieldAlert, Download, CloudUpload, LogOut } from 'lucide-react';
+import { ShieldAlert, Download, CloudUpload, LogOut, RefreshCw } from 'lucide-react';
 
 interface Props {
   initialItemId?: string | null;
@@ -48,8 +52,11 @@ export default function VaultApp({ initialItemId = null }: Props) {
   } = useVaultStore();
 
   const [session, setSession] = useState<AuthSessionState | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [vaultExists, setVaultExists] = useState(false);
   const [remoteBlob, setRemoteBlob] = useState<EncryptedVaultBlob | null>(null);
+  const [preUnlockConflict, setPreUnlockConflict] = useState<VaultConflict | null>(null);
+  const [cloudOfflineWarning, setCloudOfflineWarning] = useState<string | null>(null);
   const [needsCloudMigration, setNeedsCloudMigration] = useState(false);
   const [backupExported, setBackupExported] = useState(false);
   const [migrating, setMigrating] = useState(false);
@@ -65,10 +72,12 @@ export default function VaultApp({ initialItemId = null }: Props) {
   }, [safeDeepLinkId, setPendingDeepLinkItemId]);
 
   const loadVaultAvailability = useCallback(
-    async (authState: AuthSessionState) => {
+    async (authState: AuthSessionState, onAuthExpired?: () => void) => {
       setInitializingVault(true);
       setNeedsCloudMigration(false);
       setRemoteBlob(null);
+      setPreUnlockConflict(null);
+      setCloudOfflineWarning(null);
 
       if (authState.mode === 'local') {
         setSyncMode('local');
@@ -89,29 +98,77 @@ export default function VaultApp({ initialItemId = null }: Props) {
       try {
         const cloud = await fetchCloudVault();
         const local = loadBlob();
+        const syncMeta = loadSyncMetadata();
 
-        if (cloud.exists && cloud.blob) {
-          // Cache remote encrypted blob locally if local is missing or older
-          if (!local || getBlobRevision(cloud.blob) >= getBlobRevision(local)) {
-            persistBlob(cloud.blob, { force: true });
-          }
-          setRemoteBlob(cloud.blob);
-          setVaultExists(true);
-          setFirstRun(false);
-        } else if (local) {
-          // First-time safe migration: local vault exists, cloud is empty!
-          setNeedsCloudMigration(true);
-          setVaultExists(true);
-          setFirstRun(false);
-        } else {
-          setVaultExists(false);
-          setFirstRun(true);
+        const reconciled = await reconcileLocalAndCloudBlobs({
+          localBlob: local,
+          cloudBlob: cloud.exists ? cloud.blob : null,
+          syncMeta,
+        });
+
+        switch (reconciled.action) {
+          case 'first_run':
+            setVaultExists(false);
+            setFirstRun(true);
+            break;
+
+          case 'needs_cloud_migration':
+            setNeedsCloudMigration(true);
+            setVaultExists(true);
+            setFirstRun(false);
+            break;
+
+          case 'use_cloud':
+            persistBlob(reconciled.cloudBlob, { force: true });
+            await markCloudSynced(reconciled.cloudBlob);
+            setRemoteBlob(reconciled.cloudBlob);
+            setVaultExists(true);
+            setFirstRun(false);
+            break;
+
+          case 'in_sync':
+            await markCloudSynced(reconciled.blob);
+            setRemoteBlob(reconciled.blob);
+            setVaultExists(true);
+            setFirstRun(false);
+            break;
+
+          case 'fast_forward_cloud':
+            // Preserve previous local encrypted blob as a safety snapshot before fast-forwarding
+            if (local) {
+              createRecoverySnapshot('manual', local);
+            }
+            persistBlob(reconciled.cloudBlob, { force: true });
+            await markCloudSynced(reconciled.cloudBlob);
+            setRemoteBlob(reconciled.cloudBlob);
+            setVaultExists(true);
+            setFirstRun(false);
+            break;
+
+          case 'conflict':
+            // NEVER overwrite localStorage! Unlock local vault and open ConflictModal.
+            setPreUnlockConflict(reconciled.conflict);
+            setRemoteBlob(null);
+            setVaultExists(true);
+            setFirstRun(false);
+            break;
         }
-      } catch {
-        // Offline fallback: allow unlocking local encrypted vault if available
+      } catch (err: unknown) {
+        if (err instanceof CloudAuthError) {
+          // Session or MFA expired: fail closed and re-check auth gate
+          onAuthExpired?.();
+          return;
+        }
+        // Already authenticated + MFA-verified, but cloud sync endpoint is transiently unreachable:
+        // allow unlocking existing local encrypted cache without overwriting it.
         const localExists = hasVault();
         setVaultExists(localExists);
         setFirstRun(!localExists);
+        setCloudOfflineWarning(
+          localExists
+            ? 'Cloud sync is temporarily unreachable. Unlocking your cached local encrypted vault; changes will stay local until sync resumes.'
+            : 'Cloud sync is temporarily unreachable and no local encrypted vault cache was found.'
+        );
       } finally {
         setInitializingVault(false);
       }
@@ -120,12 +177,16 @@ export default function VaultApp({ initialItemId = null }: Props) {
   );
 
   const refreshSession = useCallback(async () => {
+    setSessionError(null);
+    setInitializingVault(true);
+
     try {
       const res = await fetch('/api/auth/session', {
         method: 'GET',
         credentials: 'same-origin',
         cache: 'no-store',
       });
+
       if (res.status === 403) {
         const forbidden: AuthSessionState = {
           mode: 'cloud',
@@ -139,21 +200,43 @@ export default function VaultApp({ initialItemId = null }: Props) {
         setInitializingVault(false);
         return;
       }
-      const data = (await res.json()) as AuthSessionState;
-      setSession(data);
-      await loadVaultAvailability(data);
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        setSession(null);
+        setSessionError(
+          typeof errBody.error === 'string' && errBody.error.length > 0
+            ? errBody.error
+            : `Authentication service returned HTTP ${res.status}.`
+        );
+        setInitializingVault(false);
+        return;
+      }
+
+      const data = (await res.json()) as Partial<AuthSessionState>;
+      if (
+        (data.mode !== 'cloud' && data.mode !== 'local') ||
+        typeof data.step !== 'string'
+      ) {
+        setSession(null);
+        setSessionError('Received an invalid authentication response from the server.');
+        setInitializingVault(false);
+        return;
+      }
+
+      const validSession = data as AuthSessionState;
+      setSession(validSession);
+      await loadVaultAvailability(validSession, () => {
+        void refreshSession();
+      });
     } catch {
-      // Fallback to local-only mode if session endpoint cannot be reached in dev
-      const fallback: AuthSessionState = {
-        mode: 'local',
-        step: 'local_only',
-        userEmail: null,
-        userId: null,
-        aal: null,
-        hasTotpFactor: false,
-      };
-      setSession(fallback);
-      await loadVaultAvailability(fallback);
+      // FAIL CLOSED: Never fall back to local-only mode when /api/auth/session fails.
+      // Explicit local-only mode is entered ONLY when the server returns 200 { mode: 'local', step: 'local_only' }.
+      setSession(null);
+      setSessionError(
+        'Unable to verify authentication status with the server. Check your connection and retry.'
+      );
+      setInitializingVault(false);
     }
   }, [loadVaultAvailability]);
 
@@ -201,6 +284,7 @@ export default function VaultApp({ initialItemId = null }: Props) {
     try {
       createRecoverySnapshot('cloud_migration', local);
       await pushCloudVault(local, 0);
+      await markCloudSynced(local);
       setRemoteBlob(local);
       setNeedsCloudMigration(false);
     } catch (err: unknown) {
@@ -211,6 +295,36 @@ export default function VaultApp({ initialItemId = null }: Props) {
       setMigrating(false);
     }
   };
+
+  // Gate 0: Fail-closed authentication error screen (NEVER falls open to local mode)
+  if (sessionError) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-vault-bg p-4">
+        <div
+          role="alert"
+          className="max-w-sm w-full bg-vault-surface border border-red-700/60 rounded-2xl p-6 text-center space-y-4 shadow-2xl"
+        >
+          <ShieldAlert className="w-10 h-10 text-red-400 mx-auto" />
+          <h1 className="text-lg font-bold text-vault-soft">
+            Authentication Check Failed
+          </h1>
+          <p className="text-xs text-vault-muted leading-relaxed">{sessionError}</p>
+          <p className="text-[11px] text-vault-muted/80 leading-relaxed">
+            For security, NMark Pass Vault fails closed and will not bypass authentication
+            or MFA when session verification is unavailable.
+          </p>
+          <button
+            type="button"
+            onClick={() => void refreshSession()}
+            className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-vault-accent hover:bg-vault-accent-hover text-vault-bg text-sm font-semibold transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Retry Authentication Check
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!session || initializingVault) {
     return <LoadingScreen />;
@@ -246,7 +360,9 @@ export default function VaultApp({ initialItemId = null }: Props) {
         deepLinkItemId={safeDeepLinkId}
         onSignedIn={(nextSession) => {
           setSession(nextSession);
-          void loadVaultAvailability(nextSession);
+          void loadVaultAvailability(nextSession, () => {
+            void refreshSession();
+          });
         }}
       />
     );
@@ -369,6 +485,8 @@ export default function VaultApp({ initialItemId = null }: Props) {
       cloudEnabled={session.mode === 'cloud'}
       userEmail={session.userEmail}
       remoteBlob={remoteBlob}
+      pendingConflict={preUnlockConflict}
+      cloudOfflineWarning={cloudOfflineWarning}
       deepLinkItemId={safeDeepLinkId}
       onSignOut={session.mode === 'cloud' ? handleSignOut : undefined}
     />

@@ -1,20 +1,33 @@
 // ============================================================
 // UnlockPage — Enter Master Password to Decrypt Vault Locally
 // Separate boundary from application auth & MFA.
+// Preserves unsynced local state and surfaces pre-unlock conflicts.
 // ============================================================
 
 'use client';
 
 import { useState } from 'react';
-import { unlockVault } from '@/lib/vaultService';
+import { unlockVault, loadSyncMetadata } from '@/lib/vaultService';
 import { useVaultStore } from '@/store/vaultStore';
-import { ShieldCheck, Eye, EyeOff, Cloud, HardDrive, KeyRound, LogOut } from 'lucide-react';
-import type { EncryptedVaultBlob } from '@/lib/types';
+import {
+  ShieldCheck,
+  Eye,
+  EyeOff,
+  Cloud,
+  CloudOff,
+  HardDrive,
+  KeyRound,
+  LogOut,
+  AlertTriangle,
+} from 'lucide-react';
+import type { EncryptedVaultBlob, VaultConflict } from '@/lib/types';
 
 interface Props {
   cloudEnabled?: boolean;
   userEmail?: string | null;
   remoteBlob?: EncryptedVaultBlob | null;
+  pendingConflict?: VaultConflict | null;
+  cloudOfflineWarning?: string | null;
   deepLinkItemId?: string | null;
   onSignOut?: () => void;
 }
@@ -23,6 +36,8 @@ export default function UnlockPage({
   cloudEnabled,
   userEmail,
   remoteBlob,
+  pendingConflict,
+  cloudOfflineWarning,
   deepLinkItemId,
   onSignOut,
 }: Props) {
@@ -38,9 +53,17 @@ export default function UnlockPage({
     setLoading(true);
 
     try {
-      const result = await unlockVault(password, remoteBlob ?? undefined);
+      // CRITICAL: When a local/cloud conflict exists, ALWAYS unlock the local
+      // encrypted blob first so unsynced local data is preserved for resolution.
+      const blobToDecrypt = pendingConflict ? undefined : (remoteBlob ?? undefined);
+      const result = await unlockVault(password, blobToDecrypt);
+      const syncMeta = loadSyncMetadata();
+
       unlock(result.key, result.vault, result.salt, result.revision, {
         migratedFromV1: result.migratedFromV1,
+        pendingConflict: pendingConflict ?? null,
+        hasUnsavedChanges: Boolean(syncMeta?.hasUnsavedLocalChanges),
+        offlineCloud: Boolean(cloudOfflineWarning),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to unlock vault.';
@@ -71,10 +94,17 @@ export default function UnlockPage({
 
           <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-vault-surface border border-vault-border text-xs text-vault-muted">
             {cloudEnabled ? (
-              <>
-                <Cloud className="w-3.5 h-3.5 text-vault-accent" />
-                <span>MFA Verified · {userEmail ?? 'Cloud Sync'}</span>
-              </>
+              cloudOfflineWarning ? (
+                <>
+                  <CloudOff className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Cloud Unreachable · Local Cache</span>
+                </>
+              ) : (
+                <>
+                  <Cloud className="w-3.5 h-3.5 text-vault-accent" />
+                  <span>MFA Verified · {userEmail ?? 'Cloud Sync'}</span>
+                </>
+              )
             ) : (
               <>
                 <HardDrive className="w-3.5 h-3.5 text-vault-accent" />
@@ -83,6 +113,30 @@ export default function UnlockPage({
             )}
           </div>
         </div>
+
+        {pendingConflict && (
+          <div
+            role="alert"
+            className="mb-4 bg-amber-950/50 border border-amber-500/50 rounded-xl px-4 py-3 text-xs text-amber-200 flex items-start gap-2.5"
+          >
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <span>
+              Local vault (rev #{pendingConflict.localRevision}) and cloud vault (rev #
+              {pendingConflict.remoteRevision}) have diverged. Unlock with your local master
+              password to resolve safely without losing changes.
+            </span>
+          </div>
+        )}
+
+        {cloudOfflineWarning && !pendingConflict && (
+          <div
+            role="status"
+            className="mb-4 bg-amber-950/30 border border-amber-600/40 rounded-xl px-4 py-3 text-xs text-amber-200 flex items-start gap-2.5"
+          >
+            <CloudOff className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <span>{cloudOfflineWarning}</span>
+          </div>
+        )}
 
         {deepLinkItemId && (
           <div className="mb-4 bg-vault-elevated/80 border border-vault-accent/30 rounded-xl px-4 py-3 text-xs text-vault-soft flex items-center gap-2.5">

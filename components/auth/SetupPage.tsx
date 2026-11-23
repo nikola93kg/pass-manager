@@ -10,6 +10,8 @@ import {
   createVault,
   verifyBackupImport,
   commitVerifiedBackupImport,
+  markCloudSynced,
+  markLocalUnsynced,
 } from '@/lib/vaultService';
 import { pushCloudVault } from '@/lib/cloudSync';
 import { useVaultStore } from '@/store/vaultStore';
@@ -77,8 +79,10 @@ export default function SetupPage({ onComplete, cloudEnabled, onSignOut }: Props
     setLoading(true);
     try {
       const { key, vault, salt, revision, blob } = await createVault(password);
+      await markLocalUnsynced(blob);
       if (cloudEnabled) {
         await pushCloudVault(blob, 0);
+        await markCloudSynced(blob);
       }
       unlock(key, vault, salt, revision);
       onComplete();
@@ -121,8 +125,10 @@ export default function SetupPage({ onComplete, cloudEnabled, onSignOut }: Props
       const { blob, revision } = await commitVerifiedBackupImport(verified, {
         nextRevision: 1,
       });
+      await markLocalUnsynced(blob);
       if (cloudEnabled) {
         await pushCloudVault(blob, 0);
+        await markCloudSynced(blob);
       }
       unlock(verified.key, verified.vault, verified.salt, revision);
       onComplete();

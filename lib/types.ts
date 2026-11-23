@@ -101,12 +101,21 @@ export type SyncStatus =
   | 'conflict'
   | 'error';
 
+export interface LocalSyncMetadata {
+  hasUnsavedLocalChanges: boolean;
+  lastSyncedRevision: number | null;
+  lastSyncedFingerprint: string | null;
+  lastLocalFingerprint: string | null;
+  updatedAt: string;
+}
+
 export interface VaultConflict {
   source: 'tab' | 'cloud';
   localRevision: number;
   remoteRevision: number;
   remoteBlob: EncryptedVaultBlob;
   detectedAt: string;
+  reason?: 'equal_revision_diverged' | 'unsaved_local_changes' | 'local_ahead_of_cloud' | 'revision_mismatch';
 }
 
 // ---- Auth & MFA ----

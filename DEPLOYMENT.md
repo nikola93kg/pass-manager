@@ -30,8 +30,8 @@ Because Pass Vault v2 uses Next.js Middleware (per-request CSP nonces + security
 4. **Create Your Sole Admin Account:**
    - In Supabase Dashboard → **Authentication → Users → Invite User** (or Add User) with your admin email.
    - Copy the generated **User UUID** (`ALLOWED_ADMIN_USER_ID`).
-5. **Apply Database Schema & RLS Policies:**
-   - Run [`supabase/migrations/001_init_vault.sql`](./supabase/migrations/001_init_vault.sql) via Supabase SQL Editor or `supabase db push`.
+5. **Apply Database Schema, RLS Policies & Hardened RPC:**
+   - Run [`supabase/migrations/001_init_vault.sql`](./supabase/migrations/001_init_vault.sql) followed by [`supabase/migrations/002_harden_upsert_rpc.sql`](./supabase/migrations/002_harden_upsert_rpc.sql) via Supabase SQL Editor or `supabase db push`.
    - Verify RLS is enabled and forced on `public.vaults`, `public.vault_snapshots`, and `public.vault_audit_log`, and that `anon` has zero table/function grants.
 6. **Configure Auth URLs:**
    - Site URL: `https://vault.nmarkdesigns.com`
@@ -50,8 +50,15 @@ Configure these variables in your hosting provider's encrypted secrets store (e.
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public | Supabase project `anon` key (safe because RLS enforces `owner + aal2`) |
 | `ALLOWED_ADMIN_EMAIL` | **Server-only** | Your sole admin email address |
 | `ALLOWED_ADMIN_USER_ID` | **Server-only** | Your Supabase Auth admin User UUID |
+| `UPSTASH_REDIS_REST_URL` | **Server-only** | Upstash Redis REST URL for distributed multi-instance rate limiting |
+| `UPSTASH_REDIS_REST_TOKEN` | **Server-only** | Upstash Redis REST token |
+| `TRUSTED_PROXY_PROVIDER` | **Server-only** | `cloudflare`, `vercel`, `custom`, or `none` (default `none` ignores spoofable forwarded IP headers) |
+| `TRUSTED_PROXY_HOP_COUNT` | **Server-only** | Required only when `TRUSTED_PROXY_PROVIDER=custom` (default `1`) |
+| `ALLOW_LOCAL_ONLY_MODE` | **Server-only** | Keep `false` (default) in production so missing Supabase config fails closed (`503`). Set `true` only for an intentional local-only installation. |
+| `RATE_LIMIT_ALLOW_IN_MEMORY` | **Server-only** | Keep `false` on serverless; set `true` only on a single-node VPS without Redis |
 
 - **Never** set `SUPABASE_SERVICE_ROLE_KEY` in the app environment — the app intentionally does not use it so PostgreSQL RLS is never bypassed.
+- Check `GET https://vault.nmarkdesigns.com/api/health` after deployment to confirm `cloudSyncConfigured: true`, `distributedRateLimitConfigured: true`, and your expected `trustedProxyProvider`.
 
 ---
 
@@ -62,12 +69,14 @@ Configure these variables in your hosting provider's encrypted secrets store (e.
    - Enforce automatic HTTP → HTTPS redirect at DNS/edge.
    - Set Cloudflare SSL/TLS mode to **Full (Strict)**.
    - Enable HSTS (already emitted by `middleware.ts`: `max-age=63072000; includeSubDomains; preload`).
-3. **Edge Rate Limiting (Recommended complement to app-level limiter):**
+   - If proxied through Cloudflare, set `TRUSTED_PROXY_PROVIDER=cloudflare`; if deployed directly on Vercel without Cloudflare proxy, set `TRUSTED_PROXY_PROVIDER=vercel`.
+3. **Edge Rate Limiting (Defense-in-Depth alongside Upstash Redis):**
    - Add a WAF rate-limit rule on `vault.nmarkdesigns.com/api/auth/*`: max 10 requests per 15 minutes per IP.
    - Add a WAF rule on `vault.nmarkdesigns.com/api/vault*`: max 60 requests per 5 minutes per IP.
-4. **Protected Preview Deployments:**
+4. **Protected Preview Deployments & Staging Verification:**
    - Enable **Vercel Deployment Protection** (or equivalent auth gate) for all Preview branches.
    - Use a separate staging Supabase project for Preview deployments — never point Preview branches at the production vault database!
+   - Run `npm run test:staging` against your staging Supabase project before promoting to production.
 
 ---
 
